@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""hop — SSH hosts from ~/.ssh/config, in the terminal.
+
+  hop               pick a host (fzf), Enter connects
+  hop <alias>       connect straight away
+  hop ls            list hosts with status
+  hop add           add a host (asks step by step)
+  hop edit <alias>  edit a host
+  hop rm <alias>    delete a host
+  hop key <alias>   copy your public key to the host (no more passwords)
+  hop gui           open the Hop window
+"""
+import os
+import shlex
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.expanduser('~/.local/share/hop'))
+import hopcore as core  # noqa: E402
+
+G, R, D, B, X = '\033[32m', '\033[31m', '\033[2m', '\033[1m', '\033[0m'
+ME = os.path.abspath(__file__)
+
+
+def status_dot(ms):
+    if ms is None:
+        return f'{R}●{X}', f'{R}offline{X}'
+    return f'{G}●{X}', f'{G}{ms} ms{X}'
+
+
+def rows(check):
+    hosts = sorted(core.load_hosts(), key=lambda h: (-h.last_used, h.alias))
+    pings = core.ping_all([h.alias for h in hosts]) if check else {}
+    for h in hosts:
+        if check:
+            dot, st = status_dot(pings.get(h.alias))
+        else:
+            dot, st = f'{D}○{X}', f'{D}…{X}'
+        group = f'{D}[{h.group}]{X}' if h.group else ''
+        yield f'{h.alias}\t{dot} {B}{h.alias:<18}{X} {h.target:<32} {st:<20} {group}'
+
+
+def show(alias):
+    h = next((x for x in core.load_hosts() if x.alias == alias), None)
+    if not h:
+        return
+    ms = core.ping(alias)
+    _, st = status_dot(ms)
+    print(f'{B}{h.alias}{X}  {st}\n')
+    for k, v in (('Host', h.hostname or h.alias), ('User', h.user or os.getenv('USER')),
+                 ('Port', h.port or '22'), ('Key', h.identity or '(default)'),
+                 ('Group', h.group or '-'), ('Note', h.note or '-')):
+        print(f'  {D}{k:<6}{X} {v}')
+    for line in h.extra:
+        print(f'  {D}{line.strip()}{X}')
+    print(f'\n  {D}ssh {shlex.quote(alias)}{X}')
+
+
+def ask(label, default=''):
+    hint = f' {D}[{default}]{X}' if default else ''
+    try:
+        val = input(f'  {label}{hint}: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(1)
+    return val or default
+
+
+def form(h=None):
+    new = h is None
+    h = h or core.Host(alias='')
+    old = h.alias
+    print(f'\n{B}{"เพิ่มเซิร์ฟเวอร์" if new else "แก้ไข " + old}{X}  {D}(Enter = ใช้ค่าเดิม, Ctrl+C = ยกเลิก){X}\n')
+    while True:
+        h.alias = ask('ชื่อเรียก (alias)', h.alias)
+        err = core.validate_alias(h.alias)
+        if not err:
+            break
+        print(f'  {R}{err}{X}')
+    h.hostname = ask('IP / hostname', h.hostname or h.alias)
+    h.user = ask('User', h.user or os.getenv('USER', ''))
+    h.port = ask('Port', h.port or '22')
+    h.identity = ask('SSH key (ว่าง = ค่า default)', h.identity)
+    h.group = ask('กลุ่ม (เช่น Home, Work)', h.group)
+    h.note = ask('โน้ต', h.note)
+    try:
+        core.save_host(h, old_alias=None if new else old)
+    except ValueError as e:
+        print(f'  {R}{e}{X}')
+        sys.exit(1)
+    print(f'\n  {G}✓ บันทึก {h.alias} แล้ว{X}')
+    return h
+
+
+def connect(alias):
+    core.touch(alias)
+    os.execvp('ssh', core.ssh_command(alias))
+
+
+def pick():
+    fzf_opts = [
+        '--ansi', '--delimiter=\t', '--with-nth=2', '--no-sort',
+        '--prompt=⇢ ssh  ', '--header-first', '--layout=reverse', '--height=70%', '--border=rounded',
+        '--border-label= 🐇 hop ',
+        '--header=enter connect · ctrl-n add · ctrl-e edit · ctrl-x delete · ctrl-k copy key · ctrl-r refresh',
+        f'--preview={shlex.quote(ME)} _show {{1}}', '--preview-window=right,42%,border-left',
+        f'--bind=start:reload({shlex.quote(ME)} _rows --check)',
+        f'--bind=ctrl-r:reload({shlex.quote(ME)} _rows --check)',
+        f'--bind=ctrl-n:execute({shlex.quote(ME)} add)+reload({shlex.quote(ME)} _rows --check)',
+        f'--bind=ctrl-e:execute({shlex.quote(ME)} edit {{1}})+reload({shlex.quote(ME)} _rows --check)',
+        f'--bind=ctrl-x:execute({shlex.quote(ME)} rm {{1}})+reload({shlex.quote(ME)} _rows --check)',
+        f'--bind=ctrl-k:execute({shlex.quote(ME)} key {{1}})',
+    ]
+    p = subprocess.run(['fzf', *fzf_opts], input='\n'.join(rows(False)),
+                       capture_output=False, stdout=subprocess.PIPE, text=True)
+    choice = p.stdout.strip()
+    if choice:
+        connect(choice.split('\t', 1)[0])
+
+
+def main(argv):
+    cmd = argv[0] if argv else ''
+    if cmd == '':
+        if not core.load_hosts():
+            print(f'ยังไม่มีเซิร์ฟเวอร์ — มาเพิ่มอันแรกกัน')
+            form()
+        return pick()
+    if cmd == '_rows':
+        print('\n'.join(rows('--check' in argv)))
+    elif cmd == '_show':
+        show(argv[1])
+    elif cmd in ('ls', 'list'):
+        for r in rows(True):
+            print(r.split('\t', 1)[1])
+    elif cmd == 'add':
+        form()
+    elif cmd == 'edit' and len(argv) > 1:
+        h = next((x for x in core.load_hosts() if x.alias == argv[1]), None)
+        form(h) if h else print(f'ไม่เจอ {argv[1]}')
+    elif cmd in ('rm', 'del') and len(argv) > 1:
+        if ask(f'ลบ {B}{argv[1]}{X} จริงมั้ย? (y/N)', 'n').lower() == 'y':
+            core.delete_host(argv[1])
+            print(f'  {G}✓ ลบแล้ว{X}')
+    elif cmd == 'key' and len(argv) > 1:
+        subprocess.run(['ssh-copy-id', argv[1]])
+        input(f'\n{D}กด Enter เพื่อกลับ{X}')
+    elif cmd == 'gui':
+        subprocess.Popen([os.path.expanduser('~/.local/bin/hop-gui')], start_new_session=True)
+    elif cmd in ('-h', '--help', 'help'):
+        print(__doc__.strip())
+    else:
+        connect(cmd)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

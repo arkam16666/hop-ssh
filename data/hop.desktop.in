@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Hop
+GenericName=SSH Manager
+Comment=SSH, files, dashboard and tunnels in one window
+Comment[th]=จัดการและเชื่อมต่อเซิร์ฟเวอร์ SSH — terminal, ไฟล์, dashboard ในที่เดียว
+Exec=@BIN@/hop-gui
+Icon=@APP_ID@
+Terminal=false
+Type=Application
+Categories=Network;RemoteAccess;Utility;
+Keywords=ssh;sftp;server;remote;terminal;
+StartupWMClass=@APP_ID@
